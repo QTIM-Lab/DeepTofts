@@ -1,0 +1,7 @@
+*.npy
+./tensorlog/*
+*.csv
+*meta*
+*~lock*
+*.nii*
+*.pyc
