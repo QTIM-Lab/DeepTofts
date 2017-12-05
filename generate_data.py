@@ -1,11 +1,16 @@
 from qtim_tools.qtim_dce.dce_util import generate_AIF, parker_model_AIF, convert_intensity_to_concentration, revert_concentration_to_intensity, estimate_concentration, estimate_concentration_general
 
 from qtim_tools.qtim_utilities.format_util import convert_input_2_numpy
+from qtim_tools.qtim_utilities.nifti_util import save_numpy_2_nifti
 
 import generate_data
 import random
 import numpy as np
 import math
+import glob
+import dicom
+import os
+import scipy
 
 class SequenceData(object):
 
@@ -92,6 +97,54 @@ class DCESequenceData(SequenceData):
 
         self.batch_id = 0    
 
+class ToftsPhantomReconstructionData(SequenceData):
+
+    def __init__(self, phantom_data, gaussian_noise=[0,0]):
+
+        self.completed = False
+
+        dce_raw = convert_input_2_numpy(phantom_data)
+
+        self.aif = np.mean(dce_raw[:, 70:, :], axis=(0,1))
+        self.data_shape = dce_raw[...,0].shape
+
+        dce_numpy = dce_raw.reshape(-1, dce_raw.shape[-1])
+
+        self.dce_data = dce_numpy
+        self.voxel_count = dce_numpy[...,0].size
+
+        self.batch_id = 0
+
+    def next(self, batch_size):
+        """ Return a batch of data. When dataset end is reached, start over.
+        """
+
+        if self.batch_id == self.voxel_count:
+            self.batch_id = 0
+            self.completed = True
+
+        batch_data = []
+        for i in range(self.batch_id, min(self.batch_id + batch_size, self.voxel_count)):
+            temp_data = self.dce_data[i,:]
+            batch_data.append([[temp_data[i], self.aif[i]] for i in xrange(temp_data.size)] + [[0.,0] for i in range(65 - temp_data.size)])
+
+        batch_seqlen = [self.dce_data.shape[-1]] *len(batch_data)
+
+        self.batch_id = min(self.batch_id + batch_size, self.voxel_count)
+
+        return batch_data, batch_seqlen
+
+    def save(self, output_filepaths):
+
+        for data, idx in enumerate([self.dce_numpy, self.voxel_count, self.data_shape]):
+            np.save(output_filepaths[idx], data)
+
+    def load(self, input_filepaths):
+
+        self.dce_numpy = np.load(input_filepaths[0])
+        self.voxel_count = np.load(input_filepaths[1])
+        self.data_shape = np.load(input_filepaths[2])
+
 class DCEReconstructionData(SequenceData):
 
     def __init__(self, dce_data, ktrans_data, ve_data, n_samples=1000, gaussian_noise=[0,0]):
@@ -143,6 +196,57 @@ class DCEReconstructionData(SequenceData):
         self.data_shape = np.load(input_filepaths[2])
         self.batch_id = 0
 
+class ToftsPhantomData(SequenceData):
+
+    def __init__(self, phantom_data_files, n_samples=1000, max_seq_len=65):
+
+        self.data = []
+        self.labels = []
+        self.seqlen = []
+
+        self.completed = False
+
+        dce_phantoms = [convert_input_2_numpy(data) for data in phantom_data_files]
+
+        sample_per_phantom = n_samples / len(dce_phantoms)
+
+        ktrans_values = np.array([.01, .02, .05, .1, .2, .5])
+        ktrans_values = np.repeat(np.repeat(ktrans_values, 10)[:,np.newaxis], 50, axis=1).T
+
+        ve_values = np.array([.01, .05, .1, .2, .5])
+        ve_values = np.repeat(np.repeat(ve_values, 10)[:,np.newaxis], 60, axis=1)
+
+        concentration_sample = list(np.ndindex(50, 60))
+        aif_sample = list(np.ndindex(50, 10))
+
+        indices = [(x,y) for x in concentration_sample for y in aif_sample]
+        print ktrans_values.shape
+
+        for phantom in dce_phantoms:
+
+            seq_len = phantom.shape[-1]
+
+            for i in range(sample_per_phantom):
+
+                self.seqlen.append(seq_len)
+                
+                x, y = random.choice(indices)
+
+                Intensity = phantom[x[0], x[1] + 10, :]
+                AIF = phantom[y[0], y[1] + 70, :]
+
+                ktrans = ktrans_values[x]
+                ve = ve_values[x]
+
+                s = []
+                for idx in xrange(len(Intensity)):
+                    s += [[Intensity[idx], AIF[idx]]]
+                s += [[0.,0] for i in range(max_seq_len - seq_len)]
+
+                self.data.append(s)
+                self.labels.append([ktrans, ve])
+
+        self.batch_id = 0    
 
 
 class ToftsSequenceData(SequenceData):
@@ -156,7 +260,7 @@ class ToftsSequenceData(SequenceData):
     dimensions). The dynamic calculation will then be perform thanks to
     'seqlen' attribute that records every actual sequence length.
     """
-    def __init__(self, n_samples=1000, max_seq_len=60, min_seq_len=25, ktrans_range=[.001,2], ve_range=[0.01,.99], gaussian_noise=[0,0], T1_range=[1000,1000], TR_range=[5, 5], flip_angle_degrees_range=[30,30], relaxivity_range=[.0045, .0045], hematocrit_range=[.45,.45], sequence_length_range=[50,50], time_interval_seconds_range=[2,2], injection_start_time_seconds_range=[10,10], T1_blood_range=[1440,1440], baseline_intensity=[100,100]):
+    def __init__(self, n_samples=1000, max_seq_len=60, min_seq_len=25, ktrans_range=[.001,2], ve_range=[0.01,.99], gaussian_noise=[0,0], T1_range=[1000,1000], TR_range=[5, 5], flip_angle_degrees_range=[30,30], relaxivity_range=[.0045, .0045], hematocrit_range=[.45,.45], sequence_length_range=[50,50], time_interval_seconds_range=[2,2], injection_start_time_seconds_range=[10,10], T1_blood_range=[1440,1440], baseline_intensity=[100,100], with_AIF=False):
         
         ktrans_low_range = [.001, .3]
 
@@ -481,3 +585,31 @@ class ToftsPatchData(SequenceData):
                 self.labels.append([true_ktrans, true_ve])
 
         self.batch_id = 0
+
+def convert_v9_phantoms():
+
+    for folder in glob.glob('../tofts_v9_phantom/QIBA_v9_Tofts/QIBA_v9_Tofts_GE_Orig/*/'):
+
+        files = glob.glob(os.path.join(folder, 'DICOM', '*'))
+        files = sorted(files)
+
+        output_array = None
+
+        for file in files:
+
+            print file
+            array = dicom.read_file(file).pixel_array.T[..., np.newaxis]
+            print array.shape
+
+            if output_array is None:
+                output_array = array
+            else:
+                print output_array.shape, array.shape
+                output_array = np.concatenate((output_array, array), axis=2)
+
+        output_filepath = os.path.basename(os.path.dirname(folder)) + '.nii.gz'
+        output_filepath = os.path.join('../tofts_v9_phantom/', output_filepath)
+        save_numpy_2_nifti(output_array, None, output_filepath)
+
+if __name__ == '__main__':
+    convert_v9_phantoms()

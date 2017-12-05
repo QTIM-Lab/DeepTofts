@@ -1,8 +1,10 @@
 import tensorflow as tf
 import numpy as np
 import csv
+import glob
 
-from generate_data import ToySequenceData, ToftsSequenceData, SineSequenceData, DCESequenceData, DCEReconstructionData, ToyPatchData, ToftsPatchData
+from generate_data import ToySequenceData, ToftsSequenceData, SineSequenceData, DCESequenceData, DCEReconstructionData, ToyPatchData, ToftsPatchData, ToftsPhantomData, ToftsPhantomReconstructionData
+
 from qtim_tools.qtim_utilities.nifti_util import save_numpy_2_nifti
 
 def dynamicRNN(x, seqlen, weights, biases, max_seq_len, num_hidden_lstm = 30):
@@ -146,7 +148,7 @@ def basic_NN():
 
 class Model():
 
-    def __init__(self, max_seq_len=65, patch_x=3, patch_y=3, num_classes=2, cnn_filters=32, cnn_features_out=32, num_hidden_lstm = 50, num_layers = 4, model_type = 'lstm', optimizer_type="regression", n_samples_train_test=[50000, 10000], total_epochs=300000, batch_size=400, display_epoch=10, test_batch_size=10000, load_data=False, old_model=False, train=False, test=False, reconstruct=True, dce_filepath=None, ktrans_filepath=None, ve_filepath=None, output_test_results='results.csv', output_model='model', output_ktrans_filepath='ktrans.nii.gz', output_ve_filepath='ve.nii.gz'):
+    def __init__(self, max_seq_len=65, patch_x=3, patch_y=3, num_classes=2, cnn_filters=32, cnn_features_out=32, num_hidden_lstm = 50, num_layers = 4, model_type = 'lstm', optimizer_type="regression", n_samples_train_test=[50000, 10000], total_epochs=300000, batch_size=400, display_epoch=10, test_batch_size=10000, load_data=False, old_model=False, train=False, test=False, reconstruct=True, phantom=False, dce_filepath=None, ktrans_filepath=None, ve_filepath=None, output_test_results='results.csv', output_model='model', output_ktrans_filepath='ktrans.nii.gz', output_ve_filepath='ve.nii.gz'):
 
         self.max_seq_len = max_seq_len
         self.patch_x = patch_x
@@ -172,6 +174,7 @@ class Model():
         self.train = train
         self.test = test
         self.reconstruct = reconstruct
+        self.phantom = phantom
 
         self.dce_filepath = dce_filepath
         self.ktrans_filepath = ktrans_filepath
@@ -187,12 +190,12 @@ class Model():
     def run_model(self):
 
         # RNN-CASE
-        self.data = tf.placeholder(tf.float32, [None, self.max_seq_len, 1])
+        self.data = tf.placeholder(tf.float32, [None, self.max_seq_len, 2])
 
         print self.data.get_shape()
 
         # CNN-RNN-CASE
-        # self.data = tf.placeholder(tf.float32, [None, self.patch_x, self.patch_y, self.max_seq_len, 1])
+        # self.data = tf.placeholder(tf.float32, [None, self.patch_x, self.patch_y, self.max_seq_len, 2])
 
         # print self.data.get_shape()
 
@@ -213,8 +216,8 @@ class Model():
             'lstm_out': tf.Variable(tf.random_normal([self.num_classes]))
         }
 
-        # self.prediction = stacked_dynamicRNN(self.data, self.seqlen, self.weights, self.biases, self.max_seq_len, self.num_hidden_lstm, self.num_layers, self.model_type)
-        self.prediction = dynamicRNN(self.data, self.seqlen, self.weights, self.biases, self.max_seq_len, self.num_hidden_lstm)
+        self.prediction = stacked_dynamicRNN(self.data, self.seqlen, self.weights, self.biases, self.max_seq_len, self.num_hidden_lstm, self.num_layers, self.model_type)
+        # self.prediction = dynamicRNN(self.data, self.seqlen, self.weights, self.biases, self.max_seq_len, self.num_hidden_lstm)
         
         # self.cnn_output = timeDistributed_CNN(self.data, self.seqlen, self.weights, self.biases, self.max_seq_len, self.num_hidden_lstm, self.num_layers, self.model_type)
         # self.prediction = stacked_dynamicRNN(self.cnn_output, self.seqlen, self.weights, self.biases, self.max_seq_len, self.num_hidden_lstm, self.num_layers, self.model_type)
@@ -251,6 +254,9 @@ class Model():
         if self.reconstruct:
             self.reconstruct_parameter_maps()
 
+        if self.phantom:
+            self.reconstruct_tofts_phantom()
+
         return
 
     def load_old_data(self):
@@ -264,17 +270,43 @@ class Model():
         # DCE_filepaths = ['/home/anderff/Documents/Data/RIDER_PHANTOMS/QTIM_RIDER_DCE_1023805636_19040901_PHANTOM.nii.gz', '/home/anderff/Documents/Data/RIDER_PHANTOMS/QTIM_RIDER_DCE_1023805636_19040901_ktrans.nii.gz', '/home/anderff/Documents/Data/RIDER_PHANTOMS/QTIM_RIDER_DCE_1023805636_19040901_ve.nii.gz']
 
         # Model Data
-        self.trainset = ToftsSequenceData(n_samples=self.n_samples_train_test[0], max_seq_len=self.max_seq_len)
+        # self.trainset = ToftsSequenceData(n_samples=self.n_samples_train_test[0], max_seq_len=self.max_seq_len)
         # self.testset = ToftsSequenceData(n_samples=self.n_samples_train_test[1], max_seq_len=self.max_seq_len)
 
         # Model Data with same params as Phantom
         # self.trainset = ToftsSequenceData(n_samples=self.n_samples_train_test[0], max_seq_len=self.max_seq_len, min_seq_len=self.max_seq_len, ktrans_range=[.001,3], ve_range=[0.01,.99], gaussian_noise=[0,0], T1_range=[800,1200], TR_range=[3,5], flip_angle_degrees_range=[15, 40], relaxivity_range=[.0045, .0045], hematocrit_range=[.45,.45], sequence_length_range=[65,65], time_interval_seconds_range=[3.5, 6.5], injection_start_time_seconds_range=[20,25], T1_blood_range=[1440,1440], baseline_intensity=[1,400])
         # self.testset = ToftsSequenceData(n_samples=self.n_samples_train_test[1], max_seq_len=self.max_seq_len, min_seq_len=self.max_seq_len, ktrans_range=[.001,3], ve_range=[0.01,.99], gaussian_noise=[0,0], T1_range=[800,1200], TR_range=[3,5], flip_angle_degrees_range=[15, 40], relaxivity_range=[.0045, .0045], hematocrit_range=[.45,.45], sequence_length_range=[65,65], time_interval_seconds_range=[3.5, 6.5], injection_start_time_seconds_range=[20,25], T1_blood_range=[1440,1440], baseline_intensity=[1,400])
 
+        # self.trainset = ToftsPhantomData(glob.glob('../tofts_v9_phantom/*.nii.gz'), n_samples=self.n_samples_train_test[0])
+
+        # # V9 Phantom Data with AIF
+        # ToftsSequenceData(n_samples=self.n_samples_train_test[0], 
+        #                     max_seq_len=70, 
+        #                     min_seq_len=30, 
+        #                     ktrans_range=[.001,.5], 
+        #                     ve_range=[0.01,.99], 
+        #                     gaussian_noise=[0,0], 
+        #                     T1_range=[1000,1000], 
+        #                     TR_range=[5,5], 
+        #                     flip_angle_degrees_range=[30, 30], 
+        #                     relaxivity_range=[.0045, .0045], 
+        #                     hematocrit_range=[.45,.45], 
+        #                     sequence_length_range=[65,65], 
+        #                     time_interval_seconds_range=[6, 10], 
+        #                     injection_start_time_seconds_range=[60,60], 
+        #                     T1_blood_range=[1440,1440], 
+        #                     baseline_intensity=[1,400])
+
+
+        # calc_DCE_properties_single(filepath, label_file=[], param_file=[], AIF_label_file=[], AIF_value_data=[], convert_AIF_values=False, outputs=['ktrans','ve','auc'], T1_tissue=1000, T1_blood=1440, relaxivity=.0045, TR=5, TE=2.1, scan_time_seconds=(6*60), hematocrit=0.45, injection_start_time_seconds=60, flip_angle_degrees=30, label_suffix=[], AIF_mode='label_average', AIF_label_suffix='-AIF-label', AIF_label_value=1, label_mode='separate', default_population_AIF=False, initial_fitting_function_parameters=[.3,.3], outfile_prefix='tofts_v9_noblur_', processes=22, mask_threshold=-1, mask_value=-1, gaussian_blur=0, gaussian_blur_axis=-1)
+
         # Training Data from Phantom
         # trainset = DCESequenceData(dce_data=DCE_filepaths[0], ktrans_data=DCE_filepaths[1], ve_data=DCE_filepaths[2], n_samples=n_samples_train_test[0])
 
-        self.testset = DCEReconstructionData(dce_data = self.dce_filepath, ktrans_data = self.ktrans_filepath, ve_data = self.ve_filepath,n_samples=self.n_samples_train_test[1])
+        # self.testset = DCEReconstructionData(dce_data = self.dce_filepath, ktrans_data = self.ktrans_filepath, ve_data = self.ve_filepath,n_samples=self.n_samples_train_test[1])
+
+        # self.testset = ToftsPhantomReconstructionData('../qtim_tools/qtim_tools/test_data/test_data_dce/tofts_v9.nii.gz')
+        self.testset = ToftsPhantomReconstructionData('../tofts_v9_phantom/6s_jit_0s_S0_500_sigma_5.nii.gz')
 
         # self.testset = DCEReconstructionData(dce_data = '/home/anderff/Documents/Data/RIDER_PHANTOMS/QTIM_RIDER_DCE_1023805636_19040901_PHANTOM.nii.gz', ktrans_data='/home/anderff/Documents/Data/RIDER_PHANTOMS/QTIM_RIDER_DCE_1023805636_19040901_ktrans.nii.gz', ve_data='/home/anderff/Documents/Data/RIDER_PHANTOMS/QTIM_RIDER_DCE_1023805636_19040901_ve.nii.gz', n_samples=n_samples_train_test[1])
 
@@ -353,20 +385,20 @@ class Model():
         output_array = np.zeros((self.testset.voxel_count, 2), dtype=float)
         remainder = self.testset.voxel_count % self.test_batch_size
         output_row_idx = 0
-        completed = True # This is dumb, come back to it
+        completed = False # This is dumb, come back to it
 
         while not completed:
-            batch_x, batch_seqlen = self.testset.next(test_batch_size)
-            preds = self.sess.run(self.prediction, feed_dict={data: batch_x, seqlen: batch_seqlen})
+            batch_x, batch_seqlen = self.testset.next(self.test_batch_size)
+            preds = self.sess.run(self.prediction, feed_dict={self.data: batch_x, self.seqlen: batch_seqlen})
 
-            print preds.shape
+            print output_row_idx
             print output_array.shape
 
-            output_array[output_row_idx:min(output_row_idx + test_batch_size, output_row_idx + preds.shape[0]), :] = preds
+            output_array[output_row_idx:min(output_row_idx + self.test_batch_size, output_row_idx + preds.shape[0]), :] = preds
 
-            output_row_idx += test_batch_size
+            output_row_idx += self.test_batch_size
 
-            if output_array.shape[0] == self.testset.voxel_count:
+            if output_row_idx > self.testset.voxel_count:
                 completed = True
 
         ktrans_array = output_array[:,0].reshape(self.testset.data_shape)
@@ -377,6 +409,40 @@ class Model():
         save_numpy_2_nifti(ve_array, self.ktrans_filepath, output_filepath=self.output_ve_filepath)
 
         return
+
+    def reconstruct_tofts_phantom(self):
+
+        if self.sess == None:
+            self.sess = tf.Session()
+            self.saver = tf.train.Saver()  
+            self.sess.run(self.init_op)
+
+        output_array = np.zeros((self.testset.voxel_count, 2), dtype=float)
+        remainder = self.testset.voxel_count % self.test_batch_size
+        output_row_idx = 0
+        completed = False # This is dumb, come back to it
+
+        while not completed:
+            batch_x, batch_seqlen = self.testset.next(self.test_batch_size)
+            preds = self.sess.run(self.prediction, feed_dict={self.data: batch_x, self.seqlen: batch_seqlen})
+
+            print output_row_idx
+            print output_array.shape
+
+            output_array[output_row_idx:min(output_row_idx + self.test_batch_size, output_row_idx + preds.shape[0]), :] = preds
+
+            output_row_idx += self.test_batch_size
+
+            if output_row_idx > self.testset.voxel_count:
+                completed = True
+
+        ktrans_array = output_array[:,0].reshape(self.testset.data_shape)
+        ve_array = output_array[:,1].reshape(self.testset.data_shape)
+
+        # Modfiy reference file to create 3D from 4D.
+        save_numpy_2_nifti(ktrans_array, self.ktrans_filepath, output_filepath=self.output_ktrans_filepath)
+        save_numpy_2_nifti(ve_array, self.ktrans_filepath, output_filepath=self.output_ve_filepath)
+
 
 if __name__ == '__main__':
     pass
